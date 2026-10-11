@@ -7,6 +7,10 @@ on (settings, data layout, metric names).
 
 ## [Unreleased]
 
+### Fixed
+- docs/google-drive.md: *Publish app* needs a home page, a privacy policy link and an authorized domain on the
+  Branding page; which of the Drive scopes to pick; the client secret is shown only once.
+
 ## [1.0.0] - 2026-10-11
 
 First release.

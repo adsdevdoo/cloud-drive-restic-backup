@@ -18,13 +18,20 @@ the owner of the app, not an account that gets backed up):
    - **Audience:** **External**. (*Internal* works only if every account you back up is in the Workspace organisation
      of the project.)
    - **Contact information:** your e-mail. Agree to the policy → **Create**.
-4. **The scope.** **Data Access → Add or remove scopes**, find `.../auth/drive.readonly` ("See and download all your
-   Google Drive files"), tick it → **Update** → **Save**.
-5. **Publish.** **Audience → Publishing status: Testing → Publish app → Confirm.** Don't skip this: in *Testing* every
+4. **The scope.** **Data Access → Add or remove scopes**, filter for `drive.readonly` and tick the one whose scope
+   is exactly `.../auth/drive.readonly` ("See and download all your Google Drive files"), not `drive.meet.readonly`
+   or `drive.metadata.readonly` → **Update** → **Save**. Leave the questions under it (features, justification,
+   demo video) empty: they are for Google's verification, which you don't need.
+5. **Links for publishing.** **Branding → App domain:** an **Application home page** and an **Application privacy
+   policy link** (one address of a site of yours does for both), then **Authorized domains → Add domain**: the
+   domain of that address → **Save**. Without them *Publish app* stays grey ("you must complete your configuration
+   on the Branding page"). Don't upload a logo: a logo needs verification.
+6. **Publish.** **Audience → Publishing status: Testing → Publish app → Confirm.** Don't skip this: in *Testing* every
    token expires after 7 days, and the backup stops a week after the sign-in. The app needs no verification by
    Google for your own use (up to 100 accounts): sign-in shows a warning instead, see below.
-6. **The client.** **Clients → Create client**, application type **Desktop app**, a name → **Create**. Copy the
-   **Client ID** and the **Client secret** (or download the JSON).
+7. **The client.** **Clients → Create client**, application type **Desktop app**, a name → **Create**. Copy the
+   **Client ID** and the **Client secret** right away (or download the JSON): the console shows the secret only
+   once.
 
 Save both in your password manager, and on the backup host:
 
