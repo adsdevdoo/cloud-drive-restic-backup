@@ -13,6 +13,8 @@ on (settings, data layout, metric names).
   runs `rclone authorize`, which takes Google's answer on `127.0.0.1:53682` of the host; the client reaches it in
   its environment. A new `sign-in` service in `compose.yml` runs it on the host's network; the browser reaches it
   through an SSH tunnel (README, Sign-in). A sign-in nobody finishes ends after 15 minutes.
+- Dropbox and Yandex sign-in: the form `auth` sent to the token endpoint ended with a line end, which became a part
+  of its last value, the client secret: Yandex answered "Wrong client secret" to a right one.
 - docs/google-drive.md: *Publish app* needs a home page, a privacy policy link and an authorized domain on the
   Branding page; which of the Drive scopes to pick; the client secret is shown only once.
 

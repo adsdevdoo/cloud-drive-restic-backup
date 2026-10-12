@@ -845,8 +845,9 @@ exchange_code() {
 
     url="$DROPBOX_TOKEN_URL"
     [[ "$S_TYPE" == dropbox ]] || url="$YANDEX_TOKEN_URL"
-    # The form goes to curl on stdin: the client secret and the code stay off the command line.
-    resp="$(CODE="$1" CID="$(<"$S_CLIENT_ID_FILE")" CSEC="$(<"$S_CLIENT_SECRET_FILE")" jq -rn '
+    # The form goes to curl on stdin: the client secret and the code stay off the command line. jq -j: no line end
+    # after it, or the last value (the secret) would end with one, and Yandex refuses it ("Wrong client secret").
+    resp="$(CODE="$1" CID="$(<"$S_CLIENT_ID_FILE")" CSEC="$(<"$S_CLIENT_SECRET_FILE")" jq -jn '
         [["grant_type", "authorization_code"], ["code", env.CODE], ["client_id", env.CID], ["client_secret", env.CSEC]]
         | map("\(.[0])=\(.[1] | @uri)") | join("&")' \
         | curl -sS --globoff --max-time 60 --data-binary @- "$url")" || { log "ERROR: could not reach $url" >&2; return 1; }

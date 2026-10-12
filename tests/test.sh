@@ -183,7 +183,8 @@ url=""; hdr=""; body=""
 while [ $# -gt 0 ]; do
   case $1 in
     -H) hdr=${2#@}; shift;;
-    --data-binary) [ "$2" = @- ] && body=$(cat); shift;;
+    # Kept with a line end at its end, if any: the services take that as part of the last value.
+    --data-binary) [ "$2" = @- ] && { body=$(cat; echo x); body=${body%x}; }; shift;;
     --max-time|-X) shift;;
     -*) ;;
     *) url=$1;;
@@ -202,6 +203,9 @@ case $url in
   *) echo "FORBIDDEN curl $url" >&2; exit 9;;
 esac
 param() { printf '%s' "$body" | tr '&' '\n' | sed -n "s/^$1=//p"; }
+# Yandex: a line end after the form ends up in the secret.
+case $body in *"
+") echo '{"error":"invalid_client","error_description":"Wrong client secret"}'; exit 0;; esac
 secret=$(jq -rn --rawfile s "/run/secrets/${type}_client_secret" '$s | @uri')
 if [ "$(param grant_type)" != authorization_code ] || [ "$(param client_id)" != "$(cat "/run/secrets/${type}_client_id")" ] \
   || [ "$(param client_secret)" != "$secret" ] || [ -n "$(param redirect_uri)" ]; then

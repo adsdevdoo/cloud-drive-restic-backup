@@ -96,6 +96,8 @@ version in the image) before fixing a "could happen": hypotheses are not bugs.
   on `127.0.0.1:53682` itself, got a token with the same client: hence `google_signin`. Not proven why: the form of
   1.0.0 also ended with a line end (in the last value, the redirect URI), which made Yandex refuse its secret, and
   rclone sends the client as HTTP Basic, without `prompt=consent`.
+- A form sent with `curl --data-binary @-` must not end with a line end: it becomes a part of the last value (`jq -j`,
+  not `jq -r`). The curl stub refuses such a form, as Yandex does.
 - `rclone authorize <backend>` with nothing else reads the client from `RCLONE_<BACKEND>_CLIENT_ID` and so on and
   prints the token JSON between two lines of its own; given a client id and secret as arguments it prints the JSON
   too, given a base64 config (the headless form of `rclone config`) it prints base64 of `{"token": "<JSON>"}`
