@@ -17,6 +17,7 @@ on (settings, data layout, metric names).
   of its last value, the client secret: Yandex answered "Wrong client secret" to a right one.
 - docs/google-drive.md: *Publish app* needs a home page, a privacy policy link and an authorized domain on the
   Branding page; which of the Drive scopes to pick; the client secret is shown only once.
+- README, off-host copy: rrsync needs python3 on the target, which a minimal Debian or Ubuntu may lack.
 
 ### Added
 - `backup.sh auth <source> --paste`: a token from `rclone authorize` run elsewhere, as its JSON or as the base64

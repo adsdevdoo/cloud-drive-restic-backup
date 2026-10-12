@@ -330,7 +330,7 @@ With the rrsync line below, use an empty path: `COPY_TARGET=bkcopy@backup-host.e
 `backup`, a system user on Debian and Ubuntu). The files then land right in the rrsync directory.
 
 On the target, restrict the key to adding files in one directory, with `rrsync` (it comes with rsync on Debian and
-Ubuntu; on Alpine `apk add rrsync`):
+Ubuntu and needs python3, which a minimal system may lack; on Alpine `apk add rrsync`):
 
 ```
 restrict,from="10.0.0.5",command="/usr/bin/rrsync -wo -no-del -no-overwrite -munge /srv/cloud-drive-backup-copy" ssh-ed25519 AAAA… cloud-drive-backup
