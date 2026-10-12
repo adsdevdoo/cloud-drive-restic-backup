@@ -3,8 +3,7 @@
 One app serves all the Google accounts you back up, personal and Google Workspace alike. It asks only for
 `drive.readonly`: it can list and download, nothing else.
 
-Why your own app: rclone's built-in one is shared by every rclone user and hits Google's rate limits all the time,
-and it asks for full access.
+Why your own app: rclone's built-in one is shared by every rclone user and hits Google's rate limits all the time.
 
 ## Make the app
 
@@ -44,17 +43,24 @@ docker compose up -d
 
 ## Sign in
 
+`auth` runs `rclone authorize`, which waits for Google's answer on `http://127.0.0.1:53682/` of the backup host, in
+the `sign-in` service of `compose.yml` (on the host's network). Your browser reaches it through an SSH tunnel:
+
 ```sh
-docker exec -it cloud-drive-backup backup.sh auth <source>
+ssh -L 53682:127.0.0.1:53682 you@backup-host          # on your computer; PuTTY: Connection → SSH → Tunnels,
+                                                      # source port 53682, destination 127.0.0.1:53682
+docker compose run --rm sign-in backup.sh auth <source>   # in that session, in the directory of compose.yml
 ```
 
-Open the link it prints in a browser (any device). Pick the account to back up. As the app is not verified, Google
-says **Google hasn't verified this app**: **Advanced → Go to drive-backup (unsafe)** → **Continue**. Allow "See and
-download all your Google Drive files".
+Open the `http://127.0.0.1:53682/auth?state=…` link it prints in the browser on your computer. Pick the account to
+back up. As the app is not verified, Google says **Google hasn't verified this app**: **Advanced → Go to
+drive-backup (unsafe)** → **Continue**. Allow "See and download all your Google Drive files". The page then says
+*Success*, and `auth` shows the e-mail of the account it signed in to.
 
-The browser then goes to `http://127.0.0.1:53682/?state=…&code=…` and shows an error (nothing listens there): copy
-the whole address from the address bar, paste it into the terminal, Enter. `auth` shows the e-mail of the account
-it signed in to.
+Without Docker Compose on the backup host, or to sign in on another computer: run
+`rclone authorize drive --auth-no-open-browser` there with the client in its environment
+(`RCLONE_DRIVE_CLIENT_ID`, `RCLONE_DRIVE_CLIENT_SECRET`, and `RCLONE_DRIVE_SCOPE=drive.readonly`), then paste the
+token it prints into `docker exec -it cloud-drive-backup backup.sh auth <source> --paste`.
 
 **Google Workspace accounts.** If sign-in ends with "Access blocked: … admin policy" or "This app is blocked", the
 organisation doesn't let users give unknown apps access to Drive. A Workspace admin trusts the app once: **Admin

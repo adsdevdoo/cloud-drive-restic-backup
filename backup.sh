@@ -19,7 +19,8 @@
 #   backup.sh run [source...]   a run of those sources (the scheduler runs one per crontab line)
 #   backup.sh init              create the restic repository, once
 #   backup.sh check             check the settings and secret files of every source (the entrypoint runs this)
-#   backup.sh auth <source>     sign in to the account of a source, interactively (docker exec -it)
+#   backup.sh auth <source>     sign in to the account of a source, interactively (Google: see google_signin)
+#   backup.sh auth <source> --paste   take a token from `rclone authorize` run elsewhere, pasted on stdin
 #   backup.sh drives <source>   list the shared drives of the Google account of a source, for <NAME>_SHARED_DRIVE
 #
 # Settings come from the environment, see .env.example. Per source <name>: <NAME>_TYPE and so on (the name in upper
@@ -28,7 +29,8 @@
 #
 # Sign-in. Each service has an OAuth client (an app) of your own with read-only access:
 # /run/secrets/<type>_client_id and <type>_client_secret, type drive, dropbox or yandex. `auth` gets a token for an
-# account and keeps it in /data/tokens/<account>.json. The account is the source name, or <NAME>_ACCOUNT: sources in
+# account and keeps it in /data/tokens/<account>.json. For Google it runs rclone authorize, which takes Google's
+# answer on 127.0.0.1:53682 (google_signin). The account is the source name, or <NAME>_ACCOUNT: sources in
 # one account (a drive and its shared drives) share one sign-in. A run writes the rclone config of the source, token
 # included, to /data/tokens/.<source>.run.conf (`auth` and `drives` to their own) and removes it at the end. rclone
 # renews an expired token in that file, and the renewed token goes back to /data/tokens/<account>.json, unless that
@@ -86,13 +88,9 @@ CHECK_STAMP="/data/.last-check"
 METRICS_DIR="/metrics"
 
 # --- OAuth of the services ---
-# Google sends the browser back to the loopback address the client is registered with (the one rclone uses), where
-# nothing listens: the code is in the address bar. Dropbox without a redirect, and Yandex with its own verification
-# page, show the code. The scopes are read-only; Dropbox and Yandex give the token the permissions of the app.
-GOOGLE_AUTH_URL="https://accounts.google.com/o/oauth2/v2/auth"
-GOOGLE_TOKEN_URL="https://oauth2.googleapis.com/token"
-GOOGLE_REDIRECT="http://127.0.0.1:53682/"
-GOOGLE_SCOPE="https://www.googleapis.com/auth/drive.readonly"
+# Google: rclone authorize signs in (google_signin). Dropbox without a redirect, and Yandex with its own verification
+# page, show the code, which auth exchanges here. The access is read-only: Google by the scope rclone asks for,
+# Dropbox and Yandex by the permissions of the app (no scope is asked for, the token gets the app's).
 GOOGLE_ABOUT_URL="https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)"
 DROPBOX_AUTH_URL="https://www.dropbox.com/oauth2/authorize"
 DROPBOX_TOKEN_URL="https://api.dropboxapi.com/oauth2/token"
@@ -291,7 +289,7 @@ check_global_settings() {
 
 
 # check_source <name> : the settings and client files of that source (loads it). The token is checked by the run:
-# a source not signed in yet must not stop the container, `auth` runs in it.
+# a source not signed in yet must not stop the container, the sign-in of Dropbox and Yandex runs in it.
 check_source() {
     local v up flags s
 
@@ -334,7 +332,8 @@ check_source() {
     number "${up}_KEEP_MONTHLY" "$S_KEEP_MONTHLY"
     # All zero: restic forget would remove nothing and say so, every run.
     (( S_KEEP_HOURLY + S_KEEP_DAILY + S_KEEP_WEEKLY + S_KEEP_MONTHLY > 0 )) || fail "the KEEP_* settings of $1 are all 0."
-    # Without both, rclone uses its own client: works with a token from rclone authorize, not with `auth`.
+    # Without both, rclone uses its own client: `auth` of Google (rclone authorize) and a token from --paste work with
+    # it, the code of Dropbox and Yandex does not.
     if [[ -e "$S_CLIENT_ID_FILE" || -e "$S_CLIENT_SECRET_FILE" ]]; then
         [[ -s "$S_CLIENT_ID_FILE" && -s "$S_CLIENT_SECRET_FILE" ]] \
             || fail "$S_CLIENT_ID_FILE and $S_CLIENT_SECRET_FILE: both or neither, and not empty."
@@ -365,7 +364,7 @@ valid_token() {
 
 # load_token : the token of the source's account into S_TOKEN.
 load_token() {
-    [[ -s "$TOKEN_FILE" ]] || fail "the account $S_ACCOUNT is not signed in yet: docker exec -it <container> backup.sh auth $SRC"
+    [[ -s "$TOKEN_FILE" ]] || fail "the account $S_ACCOUNT is not signed in yet: backup.sh auth $SRC (README, Sign-in)"
     S_TOKEN="$(<"$TOKEN_FILE")"
     valid_token "$S_TOKEN" || fail "$TOKEN_FILE is not a token: sign in again with backup.sh auth $SRC."
 }
@@ -795,17 +794,11 @@ init() {
 }
 
 
-# auth_url <state> : stdout the link that signs in to the source's service and asks for read-only access.
+# auth_url : stdout the link that signs in to the source's service (Dropbox or Yandex) with the app's permissions.
 auth_url() {
-    CID="$(<"$S_CLIENT_ID_FILE")" STATE="$1" T="$S_TYPE" \
-        GA="$GOOGLE_AUTH_URL" GR="$GOOGLE_REDIRECT" GS="$GOOGLE_SCOPE" DA="$DROPBOX_AUTH_URL" \
-        YA="$YANDEX_AUTH_URL" YR="$YANDEX_REDIRECT" jq -rn '
+    CID="$(<"$S_CLIENT_ID_FILE")" T="$S_TYPE" DA="$DROPBOX_AUTH_URL" YA="$YANDEX_AUTH_URL" YR="$YANDEX_REDIRECT" jq -rn '
         def query: to_entries | map("\(.key)=\(.value | @uri)") | join("&");
-        if env.T == "drive" then
-            # prompt=consent: Google gives a refresh token only on a consent, and the account may have consented before.
-            env.GA + "?" + ({client_id: env.CID, redirect_uri: env.GR, response_type: "code", scope: env.GS,
-                             access_type: "offline", prompt: "consent", state: env.STATE} | query)
-        elif env.T == "dropbox" then
+        if env.T == "dropbox" then
             # offline: a refresh token; the access token alone lasts 4 hours.
             env.DA + "?" + ({client_id: env.CID, response_type: "code", token_access_type: "offline"} | query)
         else
@@ -845,20 +838,16 @@ query_param() {
 }
 
 
-# exchange_code <code> : stdout the token, as rclone keeps it, that the service gives for the code. Errors go to
-# stderr: stdout is the token.
+# exchange_code <code> : stdout the token, as rclone keeps it, that the service (Dropbox or Yandex) gives for the
+# code. Errors go to stderr: stdout is the token.
 exchange_code() {
-    local url redirect="" resp token err scope
+    local url resp token err scope
 
-    case "$S_TYPE" in
-        drive) url="$GOOGLE_TOKEN_URL"; redirect="$GOOGLE_REDIRECT" ;;
-        dropbox) url="$DROPBOX_TOKEN_URL" ;;
-        yandex) url="$YANDEX_TOKEN_URL" ;;
-    esac
+    url="$DROPBOX_TOKEN_URL"
+    [[ "$S_TYPE" == dropbox ]] || url="$YANDEX_TOKEN_URL"
     # The form goes to curl on stdin: the client secret and the code stay off the command line.
-    resp="$(CODE="$1" CID="$(<"$S_CLIENT_ID_FILE")" CSEC="$(<"$S_CLIENT_SECRET_FILE")" REDIRECT="$redirect" jq -rn '
+    resp="$(CODE="$1" CID="$(<"$S_CLIENT_ID_FILE")" CSEC="$(<"$S_CLIENT_SECRET_FILE")" jq -rn '
         [["grant_type", "authorization_code"], ["code", env.CODE], ["client_id", env.CID], ["client_secret", env.CSEC]]
-        + (if env.REDIRECT == "" then [] else [["redirect_uri", env.REDIRECT]] end)
         | map("\(.[0])=\(.[1] | @uri)") | join("&")' \
         | curl -sS --globoff --max-time 60 --data-binary @- "$url")" || { log "ERROR: could not reach $url" >&2; return 1; }
     # Yandex: rclone's backend turns a "bearer" token into an "OAuth" one on first use and saves it; given as such,
@@ -879,9 +868,103 @@ exchange_code() {
     fi
     # Not a failure, the backup only reads; but a token that can write is worth knowing about.
     scope="$(printf '%s' "$resp" | jq -r '.scope // empty' 2>/dev/null)" || scope=""
-    if [[ " $scope " == *" https://www.googleapis.com/auth/drive "* || "$scope" == *.write* ]]; then
+    if [[ "$scope" == *.write* ]]; then
         log "WARNING: the token can also write ($scope). The backup only reads; a read-only app is safer, see the README." >&2
     fi
+    printf '%s\n' "$token"
+}
+
+
+# read_pasted <prompt> : stdout one line read from stdin (not shown), without the spaces around it. The prompt goes
+# to stderr: stdout is the line.
+read_pasted() {
+    local input=""
+
+    printf '%s' "$1" >&2
+    # read fails on input without a line end, having read it all the same.
+    IFS= read -r -s input || [[ -n "$input" ]] || { echo >&2; log "ERROR: nothing pasted." >&2; return 1; }
+    echo >&2
+    input="${input#"${input%%[![:space:]]*}"}"
+    input="${input%"${input##*[![:space:]]}"}"
+    [[ -n "$input" ]] || { log "ERROR: nothing pasted." >&2; return 1; }
+    printf '%s\n' "$input"
+}
+
+
+# token_from_rclone <text> : stdout the token in what rclone authorize printed: its JSON, or the base64 block rclone
+# 1.74 prints when given a base64 config, the headless form `rclone config` suggests ({"token": "<the JSON as a
+# string>"}, base64 without padding).
+token_from_rclone() {
+    local t="$1" b
+
+    if [[ "$t" != \{* ]]; then
+        [[ "$t" =~ ^[A-Za-z0-9+/_=-]+$ ]] || return 1
+        # Either alphabet, with the padding put back: base64 -d wants both.
+        b="$(printf '%s' "${t%%=*}" | tr -- '-_' '+/')"
+        while (( ${#b} % 4 )); do
+            b+="="
+        done
+        t="$(printf '%s' "$b" | base64 -d 2>/dev/null | jq -r '.token // empty' 2>/dev/null)" || return 1
+    fi
+    t="$(printf '%s' "$t" | jq -c . 2>/dev/null)" || return 1
+    valid_token "$t" || return 1
+    printf '%s\n' "$t"
+}
+
+
+# google_signin : stdout the read-only token rclone authorize gets for the Google account of the source. rclone
+# serves the sign-in on 127.0.0.1:53682 of the host it runs on and takes Google's answer there (in 1.0.0 `auth` had
+# the code pasted from the browser's address bar and exchanged it itself; Google refused that exchange). The client
+# reaches rclone in its environment (RCLONE_DRIVE_CLIENT_ID and so on), not on its command line; without one, rclone
+# uses its own. rclone's messages, the link among them, go through mask_secrets to stderr. A sign-in nobody finishes
+# ends after 15 minutes: rclone would wait forever, holding the port.
+google_signin() {
+    local out rc=0 line token
+
+    {
+        echo "rclone prints a link to http://127.0.0.1:53682/ of this host and waits there for the sign-in. Open it in"
+        echo "a browser on this host, or on your computer through an SSH tunnel (ssh -L 53682:127.0.0.1:53682 <host>),"
+        echo "with this container on the host's network (docker compose run --rm sign-in backup.sh auth $SRC)."
+        echo "Sign in to the account to back up and allow read-only access; the page then says Success."
+    } >&2
+    out="$S_CONF.authorize"
+    # rclone's stdout (the token) to the file through fd 3, its stderr through the filter: as in rclone_src.
+    {
+        (
+            local v
+            for v in $(compgen -e); do
+                [[ "$v" != RCLONE_* ]] || unset "$v"
+            done
+            if [[ -s "$S_CLIENT_ID_FILE" ]]; then
+                RCLONE_DRIVE_CLIENT_ID="$(<"$S_CLIENT_ID_FILE")" || exit 1
+                RCLONE_DRIVE_CLIENT_SECRET="$(<"$S_CLIENT_SECRET_FILE")" || exit 1
+                export RCLONE_DRIVE_CLIENT_ID RCLONE_DRIVE_CLIENT_SECRET
+            fi
+            export RCLONE_DRIVE_SCOPE=drive.readonly
+            # --foreground: GNU timeout otherwise puts rclone in a process group of its own, where Ctrl-C does not
+            # reach it, and auth would hang until the 15 minutes are up.
+            exec timeout --foreground 15m rclone --config /dev/null --log-format date,time,UTC authorize drive \
+                --auth-no-open-browser
+        ) 2>&1 1>&3 3>&- | mask_secrets 3>&-
+    } 3>"$out" || rc=$?
+    if (( rc != 0 )); then
+        rm -f "$out"
+        # 124: timeout ended it; rclone says nothing then.
+        if (( rc == 124 )); then
+            log "ERROR: no sign-in within 15 minutes: run auth again." >&2
+        else
+            log "ERROR: rclone authorize failed." >&2
+        fi
+        return 1
+    fi
+    # rclone puts the token between two lines of its own.
+    token=""
+    while IFS= read -r line; do
+        token="$(token_from_rclone "$line")" && break
+        token=""
+    done <"$out"
+    rm -f "$out"
+    [[ -n "$token" ]] || { log "ERROR: rclone authorize printed no token." >&2; return 1; }
     printf '%s\n' "$token"
 }
 
@@ -918,11 +1001,13 @@ whoami_account() {
 }
 
 
-# auth <source> : signs in to the account of the source and keeps its token. Prints a link to open in any browser,
-# reads what the service shows after the sign-in (a code, or the address the browser ended up at), or a token from
-# `rclone authorize`, from stdin; then says which account it is and what the source sees there.
+# auth <source> [--paste] : signs in to the account of the source and keeps its token, then says which account it
+# is and what the source sees there.
+#   Google: google_signin (rclone authorize).
+#   Dropbox, Yandex: prints a link to open in any browser; the service shows a code, which is read from stdin.
+#   --paste: a token from `rclone authorize` run elsewhere, read from stdin.
 auth() {
-    local state url input code got token who list
+    local mode="${2:-}" url input code token who list
 
     load_source "$1"
     check_data
@@ -932,47 +1017,33 @@ auth() {
     trap 'exit 143' TERM
     trap 'exit 130' INT
     mkdir -p "$TOKEN_ROOT"
-    state="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-    if [[ -s "$S_CLIENT_ID_FILE" ]]; then
-        url="$(auth_url "$state")" || fail "could not make the sign-in link."
+    if [[ "$mode" == --paste ]]; then
+        input="$(read_pasted "Paste what rclone authorize printed (its JSON, or the line between its arrows) and press Enter (not shown): ")" \
+            || exit 1
+        token="$(token_from_rclone "$input")" \
+            || fail "that is not a token: paste the JSON rclone authorize printed, or the line between its arrows."
+    elif [[ "$S_TYPE" == drive ]]; then
+        token="$(google_signin)" || exit 1
+    else
+        [[ -s "$S_CLIENT_ID_FILE" ]] \
+            || fail "no OAuth client for $S_TYPE ($S_CLIENT_ID_FILE, $S_CLIENT_SECRET_FILE): add one, see the README."
+        url="$(auth_url)" || fail "could not make the sign-in link."
         echo "Open this link in a browser, sign in to the account to back up and allow read-only access:"
         echo
         echo "  $url"
         echo
-        case "$S_TYPE" in
-            drive) echo "Google then sends the browser to http://127.0.0.1:53682/, which does not open: that is expected. Copy the whole address from the address bar." ;;
-            dropbox) echo "Dropbox then shows a code: copy it." ;;
-            yandex) echo "Yandex then shows a code: copy it." ;;
-        esac
-    else
-        echo "There is no OAuth client of your own for $S_TYPE ($S_CLIENT_ID_FILE, $S_CLIENT_SECRET_FILE), so only a token from \`rclone authorize $S_TYPE\` can be used."
-    fi
-    echo "A token from \`rclone authorize\` (its JSON) is taken as well."
-    printf 'Paste it here and press Enter (it is not shown): '
-    # read fails on input without a line end, having read it all the same.
-    IFS= read -r -s input || [[ -n "$input" ]] || fail "nothing pasted."
-    echo
-    # Spaces and line ends around what was pasted.
-    input="${input#"${input%%[![:space:]]*}"}"
-    input="${input%"${input##*[![:space:]]}"}"
-    [[ -n "$input" ]] || fail "nothing pasted."
-
-    if [[ "$input" == \{* ]]; then
-        token="$(printf '%s' "$input" | jq -c . 2>/dev/null)" || token=""
-        valid_token "$token" || fail "that is not a token: paste the JSON that rclone authorize printed, on one line."
-        [[ "$(printf '%s' "$token" | jq -r '.refresh_token // empty')" != "" ]] \
-            || fail "that token has no refresh token: it would stop working within hours."
-    else
-        [[ -s "$S_CLIENT_ID_FILE" ]] || fail "a code needs the OAuth client: $S_CLIENT_ID_FILE and $S_CLIENT_SECRET_FILE."
+        echo "$( [[ "$S_TYPE" == dropbox ]] && echo Dropbox || echo Yandex ) then shows a code: copy it."
+        input="$(read_pasted "Paste it here and press Enter (it is not shown): ")" || exit 1
+        # Not to send a token to the service as a code.
+        [[ "$input" != \{* ]] || fail "that is a token, not a code: backup.sh auth $1 --paste takes a token."
+        # The code, or an address with it.
         code="$input"
-        if [[ "$input" == *code=* ]]; then
-            code="$(printf '%s' "$input" | query_param code)"
-            got="$(printf '%s' "$input" | query_param state)"
-            [[ -z "$got" || "$got" == "$state" ]] || fail "that address is from another sign-in: use the link above."
-        fi
+        [[ "$input" != *code=* ]] || code="$(printf '%s' "$input" | query_param code)"
         [[ -n "$code" ]] || fail "no code in what was pasted."
         token="$(exchange_code "$code")" || exit 1
     fi
+    [[ "$(printf '%s' "$token" | jq -r '.refresh_token // empty')" != "" ]] \
+        || fail "that token has no refresh token: it would stop working within hours."
     ( exec 7>"$TOKEN_LOCK" && flock 7 && store_token "$token" ) || fail "could not write $TOKEN_FILE."
     S_TOKEN="$token"
     log "token: saved to $TOKEN_FILE"
@@ -1038,17 +1109,18 @@ main() {
             for s in "${SOURCE_LIST[@]}"; do
                 (
                     check_source "$s"
-                    [[ -s "$TOKEN_FILE" ]] || log "WARNING: $s is not signed in yet: docker exec -it <container> backup.sh auth $s"
+                    [[ -s "$TOKEN_FILE" ]] || log "WARNING: $s is not signed in yet: backup.sh auth $s (README, Sign-in)"
                 ) || rc=1
             done
             (( rc == 0 )) && log "settings: ${#SOURCE_LIST[@]} sources, all good"
             return "$rc"
             ;;
         auth|drives)
-            (( $# == 1 )) || { log "ERROR: $cmd takes one source name"; exit 2; }
+            (( $# == 1 )) || [[ "$cmd $#" == "auth 2" && "${2:-}" == --paste ]] \
+                || { log "ERROR: usage: auth <source> [--paste], drives <source>"; exit 2; }
             is_source "$1" || { log "ERROR: '$1' is not in SOURCES (${SOURCE_LIST[*]})"; exit 2; }
             CMD="$cmd"
-            "$cmd" "$1"
+            "$cmd" "$@"
             return
             ;;
     esac

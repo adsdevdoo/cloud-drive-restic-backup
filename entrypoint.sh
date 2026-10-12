@@ -9,7 +9,7 @@ if [[ "$#" -gt 0 ]]; then
 fi
 
 # Bad settings stop the container here, visibly, instead of failing every scheduled run. A source that is not signed
-# in yet does not: `backup.sh auth` runs in this container.
+# in yet does not: the sign-in of Dropbox and Yandex runs in this container.
 /usr/local/bin/backup.sh check
 
 read -r -a sources <<<"${SOURCES:-}"

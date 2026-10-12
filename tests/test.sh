@@ -1,8 +1,9 @@
 #!/bin/sh
 # Tests: builds the image and runs backup.sh against a stub rclone and a stub curl. The rclone stub turns the remote
 # "src:" of the run's config into a local directory and hands everything else to the real rclone, so the real flags,
-# sync and --max-delete are exercised. The curl stub plays the token and "who am I" endpoints of Google, Dropbox and
-# Yandex. No network, no account; the first `docker build` needs the internet for the Alpine packages. Needs Docker.
+# sync and --max-delete are exercised. The curl stub plays the token endpoints of Dropbox and Yandex and the "who am
+# I" endpoints of the three; Google's sign-in goes through the rclone stub (authorize). No network, no account; the
+# first `docker build` needs the internet for the Alpine packages. Needs Docker.
 # Usage: sh tests/test.sh
 # Each scenario prints its result; the script ends with "FAILED: N" (0 = all good) and exits non-zero on failures.
 # The data directory (restic repository, copies, tokens, state) carries over from one scenario to the next.
@@ -71,22 +72,58 @@ ALL=""
 # The rclone stub. It reads the config of the run: the account directory comes from the refresh token, a shared drive
 # or "Shared with me" add to it. It prints what it saw on stderr; with -vv it also prints the client secret and the
 # token, as rclone's debug log could, in the three forms the filter masks. It refuses (FORBIDDEN) anything but lsf,
-# sync and copy into /data/mirror, and backend drives. The scenario in /data/scenario: ok; refresh (rclone renews the
-# token); retype (rclone rewrites the token without renewing it); reauth:<account> (`auth` meanwhile, and rclone
-# renews); refused (the service refuses the token); unauthorized (Yandex Disk answers 401); badclient (it refuses the
-# client); netfail (the token can't be renewed for a network error); slow (4 seconds before each call to the
-# account, for a signal meanwhile); <command>fail:<type>.
+# sync and copy into /data/mirror, backend drives and authorize drive. The scenario in /data/scenario: ok; refresh
+# (rclone renews the token); retype (rclone rewrites the token without renewing it); reauth:<account> (`auth`
+# meanwhile, and rclone renews); refused (the service refuses the token); unauthorized (Yandex Disk answers 401);
+# badclient (it refuses the client); netfail (the token can't be renewed for a network error); slow (4 seconds before
+# each call to the account, for a signal meanwhile); <command>fail:<type>; authfail, notoken, authtimeout, authwait
+# (see authorize below).
 cat >"$d/bin/rclone" <<'EOF'
 #!/bin/bash
 s=$(cat /data/scenario 2>/dev/null)
 [ "$1" = --config ] || { echo "FORBIDDEN rclone without --config first" >&2; exit 9; }
-# RCLONE_* from the environment would bypass the config or the log filter (RCLONE_LOG_FILE).
-env | grep -q '^RCLONE_' && { echo "FORBIDDEN rclone got RCLONE_* from the environment" >&2; exit 9; }
 conf=$2; shift 2
 [ "$1" = --log-format ] || { echo "FORBIDDEN rclone without --log-format" >&2; exit 9; }
+cmd=$3
+# RCLONE_* from the environment would bypass the config or the log filter (RCLONE_LOG_FILE); only authorize gets the
+# client of Google that way, and nothing else.
+env | grep '^RCLONE_' | { [ "$cmd" = authorize ] && grep -v -E '^RCLONE_DRIVE_(CLIENT_ID|CLIENT_SECRET|SCOPE)=' || cat; } \
+  | grep -q . && { echo "FORBIDDEN rclone got RCLONE_* from the environment" >&2; exit 9; }
+# Google's sign-in: the client in the environment, never on the command line; the token on stdout between rclone's
+# lines, as rclone 1.74 prints it. Scenarios: authfail (Google refuses), notoken (rclone prints none), authtimeout
+# (nobody signed in in time), authwait (it waits).
+if [ "$cmd" = authorize ]; then
+  [ "$4 $5" = "drive --auth-no-open-browser" ] || { echo "FORBIDDEN authorize $4 $5" >&2; exit 9; }
+  # Under timeout with a limit (an unfinished sign-in would hold the port forever), and in the process group of
+  # backup.sh, so that Ctrl-C reaches it: not in one of timeout's own.
+  case "$(tr '\0' ' ' </proc/$PPID/cmdline)" in
+    "timeout --foreground "[0-9]*" rclone "*) ;;
+    *) echo "FORBIDDEN authorize not under timeout --foreground <limit>" >&2; exit 9;;
+  esac
+  read -r _ _ _ _ pgrp _ </proc/$$/stat
+  [ "$pgrp" != "$PPID" ] || { echo "FORBIDDEN authorize in a process group of its parent's" >&2; exit 9; }
+  sec=$(cat /run/secrets/drive_client_secret 2>/dev/null)
+  [ -n "$sec" ] && case "$*" in *"$sec"*) echo "FORBIDDEN the client secret on the command line" >&2; exit 9;; esac
+  client=none
+  if [ -n "${RCLONE_DRIVE_CLIENT_ID:-}" ]; then
+    [ "$RCLONE_DRIVE_CLIENT_ID" = "$(cat /run/secrets/drive_client_id)" ] && [ "$RCLONE_DRIVE_CLIENT_SECRET" = "$sec" ] \
+      && client=ok || client=bad
+  fi
+  echo "seen authorize client=$client scope=${RCLONE_DRIVE_SCOPE:-}" >&2
+  echo "NOTICE: Please go to the following link: http://127.0.0.1:53682/auth?state=stubstate" >&2
+  [ "$s" = authfail ] && { echo "ERROR : Failed to get token: oauth2: \"access_denied\"" >&2; exit 1; }
+  # As timeout ends it: rclone prints nothing, timeout exits with 124.
+  [ "$s" = authtimeout ] && exit 124
+  # Waits for a browser that never comes.
+  [ "$s" = authwait ] && exec sleep 600
+  echo "Paste the following into your remote machine --->"
+  [ "$s" = notoken ] || jq -cn '{access_token: "AT-alice-x7f3", token_type: "Bearer", refresh_token: "RT-alice-q9w2",
+    expiry: (now + 3599 | floor | todate), expires_in: 3599}'
+  echo "<---End paste"
+  exit 0
+fi
 val() { sed -n "s/^$1 = //p" "$conf"; }
 type=$(val type); token=$(val token); td=$(val team_drive); swm=$(val shared_with_me); csec=$(val client_secret)
-cmd=$3
 case $cmd in
   lsf) case $4 in src:*|/data/mirror/*) ;; *) echo "FORBIDDEN lsf $4" >&2; exit 9;; esac;;
   sync|copy) case "$4|$5" in "src:"*"|/data/mirror/"*) ;; *) echo "FORBIDDEN $cmd $4 $5" >&2; exit 9;; esac;;
@@ -135,8 +172,9 @@ exec /usr/bin/rclone --config /dev/null "${args[@]}"
 EOF
 chmod +x "$d/bin/rclone"
 
-# The curl stub: the token endpoints (they check the form: grant, client, secret, redirect) and the "who am I"
-# endpoints (they check the token in the header file). A code good-<account> gives the token of that account,
+# The curl stub: the token endpoints of Dropbox and Yandex (they check the form: grant, client, secret, no redirect)
+# and the "who am I" endpoints (they check the token in the header file). Google's sign-in goes through rclone
+# authorize: its token endpoint is FORBIDDEN here. A code good-<account> gives the token of that account,
 # write-<account> the same with a scope that can write, noref-<account> one without a refresh token; any other code is
 # refused. It refuses (FORBIDDEN) any other address.
 cat >"$d/bin/curl" <<'EOF'
@@ -156,7 +194,6 @@ who() {
   if grep -q "^Authorization: $1 AT-" "$hdr"; then echo "$2"; else echo '{"error":"unauthorized"}'; fi
 }
 case $url in
-  https://oauth2.googleapis.com/token) type=drive;;
   https://api.dropboxapi.com/oauth2/token) type=dropbox;;
   https://oauth.yandex.ru/token) type=yandex;;
   "https://www.googleapis.com/drive/v3/about?fields=user(emailAddress)") who Bearer '{"user":{"emailAddress":"alice@example.com"}}'; exit 0;;
@@ -166,10 +203,8 @@ case $url in
 esac
 param() { printf '%s' "$body" | tr '&' '\n' | sed -n "s/^$1=//p"; }
 secret=$(jq -rn --rawfile s "/run/secrets/${type}_client_secret" '$s | @uri')
-redirect=""
-[ $type = drive ] && redirect='http%3A%2F%2F127.0.0.1%3A53682%2F'
 if [ "$(param grant_type)" != authorization_code ] || [ "$(param client_id)" != "$(cat "/run/secrets/${type}_client_id")" ] \
-  || [ "$(param client_secret)" != "$secret" ] || [ "$(param redirect_uri)" != "$redirect" ]; then
+  || [ "$(param client_secret)" != "$secret" ] || [ -n "$(param redirect_uri)" ]; then
   echo '{"error":"invalid_request","error_description":"bad form"}'
   exit 0
 fi
@@ -182,7 +217,6 @@ case ${code#*-} in
   *) code=bad;;
 esac
 case $type in
-  drive) read_scope=https://www.googleapis.com/auth/drive.readonly write_scope=https://www.googleapis.com/auth/drive;;
   dropbox) read_scope='account_info.read files.content.read files.metadata.read' write_scope="$read_scope files.content.write";;
   yandex) read_scope="" write_scope="";;
 esac
@@ -239,13 +273,22 @@ check "init again does nothing"               0 'already exists' ok "backup.sh i
 check "check: good, not signed in is a warning" 0 'WARNING: alice is not signed in yet;;5 sources, all good' ok "backup.sh check"
 check "not signed in: a run fails"            1 'account alice is not signed in yet: .*backup.sh auth alice;;backup failed' ok "backup.sh run alice"
 
-# Sign-in. The link carries the client and the read-only scope; what comes back is pasted on stdin.
-check "auth, Google: link, account, listing"  0 'accounts.google.com/o/oauth2/v2/auth\?client_id=CIDdrive-1&;;scope=https%3A%2F%2Fwww.googleapis.com%2Fauth%2Fdrive.readonly;;access_type=offline;;prompt=consent;;state=[0-9a-f]{32};;token: saved;;account: alice@example.com;;src: holds 3 files and folders at the top' ok \
-  "printf 'http://127.0.0.1:53682/?code=good%%2Dalice&scope=x\n' | backup.sh auth alice"
-check "the token is kept as rclone keeps it"  0 '^access_token,expiry,refresh_token,token_type$;;^700 /data/tokens$;;^600 /data/tokens/alice.json$;;!\.conf' ok \
+# Sign-in. Google: rclone authorize, the client in its environment, the token on its stdout. Dropbox and Yandex: the
+# link carries the client; the code comes back on stdin.
+check "auth, Google: rclone authorize, account, listing" 0 'seen authorize client=ok scope=drive.readonly;;127.0.0.1:53682/auth;;ssh -L 53682:127.0.0.1:53682;;token: saved;;account: alice@example.com;;src: holds 3 files and folders at the top' ok \
+  "backup.sh auth alice </dev/null"
+check "the token is kept as rclone keeps it"  0 '^access_token,expires_in,expiry,refresh_token,token_type$;;^700 /data/tokens$;;^600 /data/tokens/alice.json$;;!\.conf;;!authorize' ok \
   "jq -r 'keys | join(\",\")' /data/tokens/alice.json; stat -c '%a %n' /data/tokens /data/tokens/alice.json; ls -A /data/tokens"
-check "auth: an address from another sign-in" 1 'from another sign-in;;!token: saved' ok "printf 'http://127.0.0.1:53682/?state=0123&code=good-alice\n' | backup.sh auth alice"
-check "auth: a refused code"                  1 'drive gave no token: invalid_grant: Bad code;;!token: saved' ok "printf 'nope\n' | backup.sh auth alice"
+LS_TOKENS="r=\$?; ls -A /data/tokens; exit \$r"
+check "auth, Google: refused, nothing left"   1 'rclone authorize failed;;!token: saved;;!authorize$;;!\.conf$' authfail \
+  "backup.sh auth alice; $LS_TOKENS"
+check "auth, Google: nobody signed in in time" 1 'no sign-in within 15 minutes: run auth again;;!rclone authorize failed;;!token: saved;;!authorize$' \
+  authtimeout "backup.sh auth alice; $LS_TOKENS"
+check "auth, Google: RCLONE_* of the environment don't reach rclone" 0 'seen authorize client=ok scope=drive.readonly;;token: saved' ok \
+  "RCLONE_LOG_FILE=/data/leak.log RCLONE_DRIVE_SCOPE=drive RCLONE_DRIVE_TOKEN=x backup.sh auth alice </dev/null"
+check "auth, Google: no token printed, nothing left" 1 'printed no token;;!token: saved;;!authorize$;;!\.conf$' notoken \
+  "backup.sh auth alice; $LS_TOKENS"
+check "auth: a refused code"                  1 'dropbox gave no token: invalid_grant: Bad code;;!token: saved' ok "printf 'nope\n' | backup.sh auth bob"
 check "auth, Dropbox: offline, the app's scopes" 0 'www.dropbox.com/oauth2/authorize\?client_id=CIDdropbox-2&response_type=code&token_access_type=offline;;!oauth2/authorize.*scope;;account: bob@example.com;;src:/Work holds 1 files' ok \
   "printf 'good-bob' | backup.sh auth bob"
 check "auth, Yandex: verification page"       0 'oauth.yandex.ru/authorize\?response_type=code&client_id=CIDyandex-3&redirect_uri=https%3A%2F%2Foauth.yandex.ru%2Fverification_code;;account: carol;;src: holds 1 files' ok \
@@ -253,14 +296,24 @@ check "auth, Yandex: verification page"       0 'oauth.yandex.ru/authorize\?resp
 check "a Yandex token is kept as OAuth"       0 '^OAuth$' ok "jq -r .token_type /data/tokens/carol.json"
 check "auth: a token that can write is flagged" 0 'WARNING: the token can also write;;token: saved' ok "printf 'write-bob\n' | backup.sh auth bob"
 check "auth: no refresh token, nothing saved" 1 'gave no refresh token;;!token: saved' ok "printf 'noref-carol\n' | backup.sh auth carol"
-# A token for two years more, as rclone authorize prints it (Yandex tokens last a year; this one must not be renewed).
-check "auth: a token from rclone authorize"   0 'token: saved;;account: carol' ok \
-  "jq -cn --arg e \"\$(date -u -d '+2 years' +%Y-%m-%dT%H:%M:%SZ)\" '{access_token: \"AT-carol-p1s9\", token_type: \"bearer\", refresh_token: \"RT-carol-z5x1\", expiry: \$e}' | backup.sh auth carol"
-check "auth: not a token"                     1 'that is not a token' ok "printf '{\"a\":1}\n' | backup.sh auth carol"
-check "auth: a token without a refresh token" 1 'has no refresh token;;!token: saved' ok "printf '{\"access_token\":\"x\"}\n' | backup.sh auth carol"
+# --paste: a token from rclone authorize run elsewhere. Its JSON: a token for two years more (Yandex tokens last a
+# year; this one must not be renewed).
+check "auth --paste: its JSON"                0 'token: saved;;account: carol' ok \
+  "jq -cn --arg e \"\$(date -u -d '+2 years' +%Y-%m-%dT%H:%M:%SZ)\" '{access_token: \"AT-carol-p1s9\", token_type: \"bearer\", refresh_token: \"RT-carol-z5x1\", expiry: \$e}' | backup.sh auth carol --paste"
+# rclone 1.74 given a base64 config: base64 of {"token": "<JSON>"}, without padding.
+check "auth --paste: the base64 block of rclone 1.74" 0 'token: saved;;account: alice@example.com' ok \
+  "jq -cn '{access_token: \"AT-alice-x7f3\", token_type: \"Bearer\", refresh_token: \"RT-alice-q9w2\", expiry: (now + 3599 | floor | todate)}' | jq -Rc '{token: .}' | base64 -w0 | tr -d = | backup.sh auth alice --paste"
+check "auth --paste: not a token"             1 'that is not a token' ok "printf '{\"a\":1}\n' | backup.sh auth carol --paste"
+check "auth --paste: not base64 of a token"   1 'that is not a token' ok "printf 'bm90IGEgdG9rZW4\n' | backup.sh auth carol --paste"
+check "auth --paste: no refresh token"        1 'has no refresh token;;!token: saved' ok "printf '{\"access_token\":\"x\"}\n' | backup.sh auth carol --paste"
+check "auth --paste: nothing pasted"          1 'nothing pasted' ok "backup.sh auth carol --paste </dev/null"
 check "auth: nothing pasted"                  1 'nothing pasted' ok "backup.sh auth carol </dev/null"
+check "auth: a token pasted for a code"       1 'that is a token, not a code: backup.sh auth carol --paste;;!curl: token' ok "printf '{\"access_token\":\"x\"}\n' | backup.sh auth carol"
+check "auth: a bad option"                    2 'usage: auth <source> \[--paste\]' ok "backup.sh auth alice --bogus"
 SEC=$d/secrets-none
-check "auth without a client: a code is refused" 1 'only a token from `rclone authorize drive`;;a code needs the OAuth client' ok "printf 'good-alice\n' | backup.sh auth alice"
+check "auth, Google without a client: rclone's own" 0 'seen authorize client=none scope=drive.readonly;;token: saved;;account: alice@example.com' ok \
+  "backup.sh auth alice </dev/null"
+check "auth, Dropbox without a client: refused" 1 'no OAuth client for dropbox;;!token: saved' ok "printf 'good-bob\n' | backup.sh auth bob"
 SEC=$d/secrets-half
 check "client: id without secret"             1 'both or neither' ok "backup.sh check"
 SEC=$d/secrets
@@ -284,10 +337,10 @@ check "Dropbox, a folder of it"               0 'seen lsf src:/Work type=dropbox
 check "only the folder is copied"             0 '^w.txt$;;!other' ok "ls /data/mirror/bob"
 check "Yandex, a token for years goes as it is" 0 'seen lsf src: type=yandex .*expiry=20;;!expiry=2000-01-01;;done: account 1 files' ok "backup.sh run carol"
 check "Go's zero time is no expiry"           0 'token: saved;;expiry=0001-01-01T00:00:00Z' ok \
-  "printf '%s\n' '{\"access_token\":\"AT-carol-p1s9\",\"token_type\":\"OAuth\",\"refresh_token\":\"RT-carol-z5x1\",\"expiry\":\"0001-01-01T00:00:00Z\"}' | backup.sh auth carol"
+  "printf '%s\n' '{\"access_token\":\"AT-carol-p1s9\",\"token_type\":\"OAuth\",\"refresh_token\":\"RT-carol-z5x1\",\"expiry\":\"0001-01-01T00:00:00Z\"}' | backup.sh auth carol --paste"
 # Expiry as rclone writes it: fractions, an offset. Within 275 days: rclone is to renew it.
 check "a token expiring within 275 days goes as expired" 0 'token: saved;;seen lsf src: type=yandex .*expiry=2000-01-01T00:00:00Z' ok \
-  "jq -cn --arg e \"\$(date -u -d '+100 days' +%Y-%m-%dT%H:%M:%S.123456789+00:00)\" '{access_token: \"AT-carol-p1s9\", token_type: \"OAuth\", refresh_token: \"RT-carol-z5x1\", expiry: \$e}' | backup.sh auth carol"
+  "jq -cn --arg e \"\$(date -u -d '+100 days' +%Y-%m-%dT%H:%M:%S.123456789+00:00)\" '{access_token: \"AT-carol-p1s9\", token_type: \"OAuth\", refresh_token: \"RT-carol-z5x1\", expiry: \$e}' | backup.sh auth carol --paste"
 check "rclone flags: per source over global, on both lists" 0 'done: account 3 files .*copy 4 files .*\(0 deleted\)' ok \
   "RCLONE_FLAGS='--exclude b.txt' ALICE_RCLONE_FLAGS='--exclude a.txt' backup.sh run alice"
 check "prune once a day"                      0 'done: ;;!restic: prune' ok "backup.sh run alice"
@@ -337,7 +390,7 @@ check "a network error is not a refusal"      1 'could not list the account;;!re
 check "TERM during the listing: logged, not in the listing" 0 'backup failed \(exit code 143\);;^rc2=143$;;^in listing: 0$' slow \
   "backup.sh run alice & p=\$!; sleep 2; kill -TERM \$p; wait \$p; echo rc2=\$?; echo \"in listing: \$(cat /data/state/alice/listing.tmp.* | grep -c 'backup failed')\""
 check "TERM during auth: its config removed"  0 '^rc2=143$;;!\.alice\.auth\.conf' slow \
-  "printf 'good-alice\n' | backup.sh auth alice & p=\$!; sleep 2; kill -TERM \$p; wait \$p; echo rc2=\$?; ls -A /data/tokens"
+  "backup.sh auth alice </dev/null & p=\$!; sleep 2; kill -TERM \$p; wait \$p; echo rc2=\$?; ls -A /data/tokens"
 # A leftover .partial and a failed listing: the snapshot of the run doesn't keep it.
 check "a failed listing's snapshot has no leftover .partial" 0 'could not list the account;;^partial in snapshot: 0$' lsffail:drive \
   "touch /data/mirror/alice/zz.0123abcd.partial; backup.sh run alice; echo \"partial in snapshot: \$(restic ls latest --tag alice | grep -c partial)\""
@@ -354,7 +407,7 @@ check "repository busy: waits"                0 'waiting for another run;;done: 
 
 check "unknown source"                        2 "'nope' is not in SOURCES" ok "backup.sh run nope"
 check "unknown command"                       2 "unknown command 'bogus'" ok "backup.sh bogus"
-check "auth without a source"                 2 'auth takes one source name' ok "backup.sh auth"
+check "auth without a source"                 2 'usage: auth <source> \[--paste\]' ok "backup.sh auth"
 check "auth of an unknown source"             2 "'nope' is not in SOURCES" ok "backup.sh auth nope"
 check "bad source name"                       1 "source name 'Alice'" ok "SOURCES=Alice backup.sh check"
 check "source listed twice"                   1 'listed twice' ok "SOURCES='alice alice' backup.sh check"
@@ -422,6 +475,39 @@ for args in "-e SOURCES=" "-e ALICE_SCHEDULE=bogus" "-e ALICE_TYPE=gdrive"; do
   fi
   docker rm -f cdrb-sched-test >/dev/null 2>&1
 done
+
+# The sign-in service of compose.yml, as it runs: docker stop ends a Google sign-in that waits for the browser at once
+# and leaves nothing behind. Without init and TINI_KILL_PROCESS_GROUP, bash holds TERM back until rclone ends, and
+# Docker kills it after 10 s, leaving the .authorize file.
+echo authwait >"$d/data/scenario"
+docker run -d --name cdrb-sched-test --network none --init -e TINI_KILL_PROCESS_GROUP=1 $E $V \
+  -v "$d/secrets:/run/secrets:ro" "$IMG" backup.sh auth alice >/dev/null
+# Stopped before the sign-in waits, bash would die of TERM all the same: wait until rclone is there.
+i=0
+until docker logs cdrb-sched-test 2>&1 | grep -q 'seen authorize' || [ "$i" -ge 40 ]; do
+  sleep 0.5; i=$((i + 1))
+done
+waiting=$(docker logs cdrb-sched-test 2>&1 | grep -c 'seen authorize')
+t0=$(date +%s)
+docker stop -t 10 cdrb-sched-test >/dev/null
+t=$(( $(date +%s) - t0 ))
+st=$(docker inspect -f '{{.State.ExitCode}}' cdrb-sched-test)
+left=$(docker run --rm -v "$d/data:/data" alpine:3.24 ls -A /data/tokens | grep -E 'authorize$|\.conf$')
+# compose.yml gives the sign-in service the same: its block runs to the next service.
+svc=$(awk '/^  sign-in:$/ { f = 1; next } f && /^  [^ #]/ { f = 0 } f' compose.yml)
+c_init=no; c_tini=no
+printf '%s\n' "$svc" | grep -qx '    init: true' && c_init=yes
+printf '%s\n' "$svc" | grep -qx '      TINI_KILL_PROCESS_GROUP: "1"' && c_tini=yes
+if [ "$waiting" -ge 1 ] && [ "$st" = 143 ] && [ "$t" -lt 5 ] && [ -z "$left" ] \
+  && ! docker logs cdrb-sched-test 2>&1 | grep -q FORBIDDEN && [ "$c_init $c_tini" = "yes yes" ]; then
+  echo "ok   sign-in service: docker stop ends a waiting sign-in at once, nothing left"
+else
+  echo "FAIL sign-in service: docker stop (waiting: $waiting, exit $st after ${t}s, left: $left;" \
+    "compose.yml: init $c_init, TINI_KILL_PROCESS_GROUP $c_tini)"
+  docker logs cdrb-sched-test 2>&1 | tail -5
+  FAILED=$((FAILED + 1))
+fi
+docker rm -f cdrb-sched-test >/dev/null 2>&1
 
 echo "FAILED: $FAILED"
 [ "$FAILED" -eq 0 ]

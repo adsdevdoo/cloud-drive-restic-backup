@@ -46,9 +46,11 @@ version in the image) before fixing a "could happen": hypotheses are not bugs.
 - New behavior gets a new scenario. A fix for a bug gets a scenario that failed before the fix.
 - The rclone stub maps the remote `src:` of the run's config to a local directory chosen by the refresh token, and
   runs the real rclone for everything else: the real flags, `sync`, `--max-delete` and filters are exercised. It
-  refuses anything but `lsf`, `sync` and `copy` into `/data/mirror`, and `backend drives`.
-- The curl stub plays the token and "who am I" endpoints of the three services and checks the form (grant, client,
-  secret, redirect). It refuses any other address.
+  refuses anything but `lsf`, `sync` and `copy` into `/data/mirror`, `backend drives` and `authorize drive` (which
+  must get the client in its environment, never on its command line, and prints a token as rclone 1.74 does).
+- The curl stub plays the token endpoints of Dropbox and Yandex and the "who am I" endpoints of the three services,
+  and checks the form (grant, client, secret, no redirect). It refuses any other address, Google's token endpoint
+  included: Google's sign-in goes through rclone authorize.
 - The tests fail if a client secret or a token shows up in the output.
 - When a change touches how the image starts (Dockerfile, entrypoint), run the image's own command, not just
   `docker run … backup.sh`.
@@ -66,16 +68,21 @@ version in the image) before fixing a "could happen": hypotheses are not bugs.
 - A source or account name goes into variable names, file names and metric labels: it is validated before any use
   (`^[a-z][a-z0-9_]{0,31}$`).
 - **Never write to an account.** rclone runs only `lsf`, `sync` and `copy` with the account as the source and the
-  local copy as the destination, and `backend drives`. No `move`, `delete`, `purge`, `mkdir`, no account as a
-  destination. The OAuth clients ask for read-only access.
+  local copy as the destination, `backend drives`, and `authorize drive` for the sign-in. No `move`, `delete`,
+  `purge`, `mkdir`, no account as a destination. The OAuth clients ask for read-only access.
 - **Never print a secret**: client secrets and tokens, not in logs, not on a command line (ps shows it), not in
   examples or commit messages. rclone gets them in its config file (600, in a 700 directory, one per source and
   command, removed afterwards);
   curl gets the form on stdin and the header from a file. rclone's stderr goes through `mask_secrets`, which masks
   them by value in all three forms (plain, Go `%q`, `%q` inside JSON). `--dump`, `--log-file` and `--config` are
-  refused, and no `RCLONE_*` variable of the environment reaches rclone (the rclone stub checks it).
+  refused, and no `RCLONE_*` variable of the environment reaches rclone (the rclone stub checks it), except the
+  Google client (`RCLONE_DRIVE_CLIENT_ID`, `_CLIENT_SECRET`, `_SCOPE`) that `google_signin` gives `rclone authorize`:
+  rclone authorize takes a client from its arguments or its environment, and arguments are visible in ps.
 - rclone's stdout is a listing (`lsf` into `listing.tsv`): nothing else may write there. `-P` is refused for that;
   a function called with its stdout redirected logs to stderr.
+- `timeout` in the image is GNU's: without `--foreground` it puts the command in a process group of its own, out of
+  reach of Ctrl-C in the terminal. Anything interactive runs under `timeout --foreground` (the rclone stub checks
+  `authorize` for it).
 - Versions in the image: Alpine 3.24, rclone 1.74, restic 0.18, supercronic 0.2, curl 8, jq 1.8, GNU gawk.
 
 ## What we learned about rclone (1.74)
@@ -84,6 +91,16 @@ version in the image) before fixing a "could happen": hypotheses are not bugs.
   of the remote), re-reading the file before a renewal; a config from the environment could not be saved.
 - The Dropbox backend asks for write scopes when it signs in (hard-coded), so `rclone authorize dropbox` can't get
   a token from a read-only app: `backup.sh auth` signs in without rclone. Refreshing a token doesn't ask for scopes.
+- Observed in 1.0.0 (2026-10): Google refused to exchange the code pasted from the address bar (`invalid_request`,
+  "doesn't comply with Google's OAuth 2.0 policy for keeping apps secure"), while `rclone authorize`, which listens
+  on `127.0.0.1:53682` itself, got a token with the same client: hence `google_signin`. Not proven why: the form of
+  1.0.0 also ended with a line end (in the last value, the redirect URI), which made Yandex refuse its secret, and
+  rclone sends the client as HTTP Basic, without `prompt=consent`.
+- `rclone authorize <backend>` with nothing else reads the client from `RCLONE_<BACKEND>_CLIENT_ID` and so on and
+  prints the token JSON between two lines of its own; given a client id and secret as arguments it prints the JSON
+  too, given a base64 config (the headless form of `rclone config`) it prints base64 of `{"token": "<JSON>"}`
+  instead, RawStdEncoding (`token_from_rclone` takes either alphabet, with or without padding). Either way it asks
+  Google for full access unless `RCLONE_DRIVE_SCOPE` (or the scope in the base64 config) says otherwise.
 - Google documents and Dropbox Paper documents are listed with the extension of their export format and size -1;
   sync and copy ignore the size of such a file and compare the modification time.
 - `--max-delete N` lets N file deletions through and stops the sync with a fatal error at the next one; it counts

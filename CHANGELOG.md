@@ -8,8 +8,22 @@ on (settings, data layout, metric names).
 ## [Unreleased]
 
 ### Fixed
+- Google sign-in: `backup.sh auth` failed for every Google account, Google refusing to exchange the code pasted
+  from the browser's address bar ("doesn't comply with Google's OAuth 2.0 policy for keeping apps secure"). It now
+  runs `rclone authorize`, which takes Google's answer on `127.0.0.1:53682` of the host; the client reaches it in
+  its environment. A new `sign-in` service in `compose.yml` runs it on the host's network; the browser reaches it
+  through an SSH tunnel (README, Sign-in). A sign-in nobody finishes ends after 15 minutes.
 - docs/google-drive.md: *Publish app* needs a home page, a privacy policy link and an authorized domain on the
   Branding page; which of the Drive scopes to pick; the client secret is shown only once.
+
+### Added
+- `backup.sh auth <source> --paste`: a token from `rclone authorize` run elsewhere, as its JSON or as the base64
+  block rclone 1.74 prints when given a base64 config.
+
+### Changed
+- `backup.sh auth` takes a token from `rclone authorize` only with `--paste`. Without it, `auth` of Google runs
+  `rclone authorize` and reads nothing from stdin; `auth` of Dropbox and Yandex takes only a code (or an address
+  with it).
 
 ## [1.0.0] - 2026-10-11
 

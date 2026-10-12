@@ -26,3 +26,22 @@ services:
     logging:
       driver: json-file
       options: {max-size: 10m, max-file: "3"}
+
+  # Google's sign-in only: rclone authorize waits for the browser on 127.0.0.1:53682 of the host, so this one runs on
+  # the host's network. Not started by `up`: docker compose run --rm sign-in backup.sh auth <source>
+  sign-in:
+    image: ${IMAGE:-ghcr.io/adsdevdoo/cloud-drive-restic-backup:latest}
+    profiles: [sign-in]
+    network_mode: host
+    # docker stop then ends a sign-in that waits for the browser at once: the signal goes to rclone too, which bash,
+    # waiting for it, would not pass on. (A closed SSH session leaves the container running: the 15 minutes end it.)
+    init: true
+    environment:
+      TINI_KILL_PROCESS_GROUP: "1"
+    env_file: .env
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:?set DATA_DIR in .env}
+        target: /data
+        bind: {create_host_path: false}
+      - ./secrets:/run/secrets:ro

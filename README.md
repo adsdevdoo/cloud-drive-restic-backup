@@ -31,8 +31,8 @@ accounts, and saves traffic: each run downloads only new and changed files.
   accounts and encrypted. A file deleted or overwritten in the account stays in the older snapshots.
 - **Deletion guard.** A run that would delete more than 10% of the copy leaves it as it is and fails: a mass
   deletion in the account is an alert, not an emptied copy.
-- **Sign-in from anywhere.** `backup.sh auth` prints a link: sign in on any device, paste the code back. No
-  browser or rclone needed on the server.
+- **Sign-in from your computer.** `backup.sh auth` prints a link: sign in in your browser (for Google through an
+  SSH tunnel to the server). No browser needed on the server; the client secret never leaves it.
 - **Documents too.** Google Docs, Sheets and Slides are exported to docx, xlsx and pptx; Dropbox Paper to html.
 - **Secrets stay secret.** Client secrets and tokens never on a command line, masked in rclone's logs.
 - **Off-host copy** to a second machine over SSH, with a key that can only add files (rrsync).
@@ -54,7 +54,7 @@ read -rs v && printf '%s' "$v" > secrets/drive_client_secret; unset v   # …and
 head -c 32 /dev/urandom | base64 > secrets/restic_password && chmod 600 secrets/*
 mkdir -p /srv/cloud-drive-backup     # the DATA_DIR from .env
 docker compose pull && docker compose up -d && docker exec cloud-drive-backup backup.sh init
-docker exec -it cloud-drive-backup backup.sh auth gdrive              # per account: sign in
+docker compose run --rm sign-in backup.sh auth gdrive     # per account: sign in (Google: see Sign-in)
 ```
 
 The first backup then runs on the schedule (04:30); to start it now, see [Install](#install). Details, and what to
@@ -129,8 +129,8 @@ Then sign in each source, see [Sign-in](#sign-in).
 
 The container checks the settings and the client files when it starts and exits if something is wrong (and Docker
 starts it again, and again): `docker logs cloud-drive-backup` says what. A source that is not signed in yet doesn't
-stop it (sign-in runs in it); its runs fail until it is. To run every source now instead of waiting for the
-schedule, detached from your shell, with the output going to `docker logs`:
+stop it (the sign-in of Dropbox and Yandex runs in it); its runs fail until it is. To run every source now instead
+of waiting for the schedule, detached from your shell, with the output going to `docker logs`:
 
 ```sh
 docker exec -d cloud-drive-backup sh -c 'backup.sh >/proc/1/fd/1 2>&1'
@@ -146,26 +146,47 @@ when the backup disk isn't mounted. For the same reason a run never creates the 
 
 ## Sign-in
 
+`auth` gets the token, keeps it in `DATA_DIR/tokens/<account>.json` (600), and shows which account it is (its e-mail
+or login) and how many files and folders the source sees at its top. If it shows another account than you meant,
+the browser was signed in to it: sign in again from a private window.
+
+**Google.** `auth` runs `rclone authorize`, which serves the sign-in on `http://127.0.0.1:53682/` of the host and
+takes Google's answer there (the client reaches rclone in its environment, not on its command line). Run it on the
+host's network, with the `sign-in` service of `compose.yml`, and reach that port from your browser through an SSH
+tunnel:
+
+```sh
+ssh -L 53682:127.0.0.1:53682 you@backup-host        # on your computer; PuTTY: Connection → SSH → Tunnels
+docker compose run --rm sign-in backup.sh auth gdrive  # in that session, in the directory of compose.yml
+```
+
+Open the `http://127.0.0.1:53682/auth?state=…` link it prints in the browser on your computer, sign in to the
+account to back up and allow read-only access; the page then says *Success*. With a browser on the backup host
+itself, no tunnel is needed. A sign-in nobody finishes ends after 15 minutes; Ctrl-C ends it at once. If the SSH
+session drops meanwhile, the sign-in goes on waiting, the port taken, until then: `docker ps` shows its container
+as `…-sign-in-run-…`, and `docker stop` ends it.
+
+**Dropbox, Yandex.**
+
 ```sh
 docker exec -it cloud-drive-backup backup.sh auth <source>
 ```
 
-prints a link. Open it in a browser on any device, sign in to the account to back up and allow read-only access.
-Then:
+prints a link. Open it in a browser on any device, sign in to the account and allow read-only access. The service
+shows a code: paste it into the terminal (it is not shown) and press Enter.
 
-- **Google** sends the browser to `http://127.0.0.1:53682/?state=…&code=…`, a page that doesn't open: that is
-  expected. Copy the whole address from the address bar.
-- **Dropbox** and **Yandex** show a code: copy it.
+**A token from elsewhere.** `rclone authorize` run on any computer with a browser works too:
 
-Paste it into the terminal (it is not shown) and press Enter. `auth` gets the token, keeps it in
-`DATA_DIR/tokens/<account>.json` (600), and shows which account it is (its e-mail or login) and how many files and
-folders the source sees at its top. If it shows another account than you meant, the browser was signed in to it:
-sign in again from a private window.
+```sh
+docker exec -it cloud-drive-backup backup.sh auth <source> --paste   # then paste what rclone printed, Enter
+```
 
-A token from `rclone authorize` works as well: paste its JSON (one line) instead. It must have been made with the
-same client as the one in `secrets/` (or, with no client in `secrets/`, with rclone's own; not recommended: it is
-shared by all rclone users and rate-limited). Prefer `auth`: `rclone authorize` asks Google for full access and
-Dropbox for write access (and fails with a read-only Dropbox app). The backup only reads either way.
+It takes the token's JSON, or the line between the arrows (rclone 1.74 prints a base64 block there when given a
+base64 config, the headless form `rclone config` suggests). The token must have been made with the client in
+`secrets/`, or, with none there, with rclone's own (shared by all rclone users and rate-limited). For Google, have it
+ask for read-only access: `rclone authorize drive` asks for full access unless told the scope, e.g. by
+`RCLONE_DRIVE_SCOPE=drive.readonly` (with the client in `RCLONE_DRIVE_CLIENT_ID` and `RCLONE_DRIVE_CLIENT_SECRET`,
+off the command line). For Dropbox, use `auth` itself: rclone asks for write access, which a read-only app refuses.
 
 Sources in one account share a sign-in: set `<NAME>_ACCOUNT` to the source that signs in (say, a Google shared
 drive's source to the one of My Drive). Sign in again (`auth` of any of them) when a run says `refused the token`:
