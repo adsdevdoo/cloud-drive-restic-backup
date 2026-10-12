@@ -7,6 +7,8 @@ on (settings, data layout, metric names).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-12
+
 ### Fixed
 - Google sign-in: `backup.sh auth` failed for every Google account, Google refusing to exchange the code pasted
   from the browser's address bar ("doesn't comply with Google's OAuth 2.0 policy for keeping apps secure"). It now
@@ -51,5 +53,6 @@ First release.
 - Offline tests (`tests/test.sh`) against a stub rclone over the real one and a stub curl; images for amd64 and
   arm64 on ghcr.io.
 
-[Unreleased]: https://github.com/adsdevdoo/cloud-drive-restic-backup/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/adsdevdoo/cloud-drive-restic-backup/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/adsdevdoo/cloud-drive-restic-backup/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/adsdevdoo/cloud-drive-restic-backup/releases/tag/v1.0.0
